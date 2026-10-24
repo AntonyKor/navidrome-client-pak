@@ -4,7 +4,6 @@
 set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION="${1:-$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$ROOT/pak.json")}"
-VERSION="${VERSION#v}"   # tags are vX.Y.Z; pak.json uses X.Y.Z
 "$ROOT/scripts/build.sh"
 STAGE="$ROOT/build/Navidrome.pak"
 rm -rf "$ROOT/build" && mkdir -p "$STAGE/bin/tg5040"

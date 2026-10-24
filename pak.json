@@ -1,7 +1,7 @@
 {
   "type": "TOOL",
   "name": "Navidrome",
-  "version": "0.1.0",
+  "version": "v0.1.0",
   "description": "Navidrome / Subsonic music client for NextUI (based on PlexMusicPak by Thwonp)",
   "platforms": [
     "tg5040"
