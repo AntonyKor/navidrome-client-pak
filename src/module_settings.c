@@ -1,0 +1,393 @@
+#include <stdio.h>
+#include <string.h>
+
+#include "api.h"
+#include "defines.h"
+#include "module_auth.h"
+#include "module_browse.h"
+#include "module_common.h"
+#include "module_settings.h"
+#include "nd_art.h"
+#include "nd_config.h"
+#include "nd_models.h"
+#include "ui_fonts.h"
+#include "ui_utils.h"
+
+/* =========================================================================
+ * Internal state machine
+ * ========================================================================= */
+
+typedef enum {
+    SETTINGS_STATE_MENU,          /* Main settings menu */
+    SETTINGS_STATE_SIGNOUT_CONFIRM /* Sign-out confirmation dialog */
+} SettingsState;
+
+/* Menu item indices */
+#define SETTINGS_ITEM_SWITCH_SERVER    0
+#define SETTINGS_ITEM_LIBRARY          1
+#define SETTINGS_ITEM_SCREEN_TIMEOUT   2
+#define SETTINGS_ITEM_STREAM_BITRATE   3
+#define SETTINGS_ITEM_DOWNLOAD_BITRATE 4
+#define SETTINGS_ITEM_POCKET_LOCK      5
+#define SETTINGS_ITEM_PRELOAD_COUNT    6
+#define SETTINGS_ITEM_SIGN_OUT         7
+#define SETTINGS_ITEM_COUNT            8
+
+/* Screen-timeout cycle: ordered list of values (seconds) */
+static const int SCREEN_TIMEOUT_VALUES[] = { 0, 5, 10, 15, 30, 60, 120, 300 };
+static const int SCREEN_TIMEOUT_COUNT =
+    (int)(sizeof(SCREEN_TIMEOUT_VALUES) / sizeof(SCREEN_TIMEOUT_VALUES[0]));
+
+/* Human-readable label for a screen_timeout value */
+static const char *screen_timeout_label(int seconds)
+{
+    switch (seconds) {
+        case 0:   return "Off";
+        case 5:   return "5 seconds";
+        case 10:  return "10 seconds";
+        case 15:  return "15 seconds";
+        case 30:  return "30 seconds";
+        case 60:  return "1 minute";
+        case 120: return "2 minutes";
+        case 300: return "5 minutes";
+        default:  return "Off";
+    }
+}
+
+/* Return the cycle index for the current timeout value (0 if not found) */
+static int screen_timeout_index(int seconds)
+{
+    for (int i = 0; i < SCREEN_TIMEOUT_COUNT; i++) {
+        if (SCREEN_TIMEOUT_VALUES[i] == seconds)
+            return i;
+    }
+    return 0;
+}
+
+/* Bitrate cycle: 0 = Original; 96/128/192/256/320 kbps = transcode to Opus */
+static const int BITRATE_VALUES[] = { 0, 96, 128, 192, 256, 320 };
+static const int BITRATE_COUNT    = 6;
+
+static const char *bitrate_label(int kbps)
+{
+    if (kbps == 0) return "Original";
+    static char buf[16];
+    snprintf(buf, sizeof(buf), "%d kbps", kbps);
+    return buf;
+}
+
+static int bitrate_index(int kbps)
+{
+    for (int i = 0; i < BITRATE_COUNT; i++)
+        if (BITRATE_VALUES[i] == kbps) return i;
+    return 0;
+}
+
+/* Human-readable label for a preload_count value */
+static const char *preload_count_label(int count)
+{
+    if (count == 0) return "Off";
+    if (count == 1) return "1 track";
+    static char buf[16];
+    snprintf(buf, sizeof(buf), "%d tracks", count);
+    return buf;
+}
+
+/* =========================================================================
+ * Render helpers
+ * ========================================================================= */
+
+/*
+ * Render the main settings menu.
+ */
+static void render_settings_menu(SDL_Surface *screen, int show_setting,
+                                  int menu_selected, int scroll,
+                                  int menu_items_visible)
+{
+    const NdConfig *cfg = nd_config_get_mutable();
+
+    SDL_FillRect(screen, NULL, SDL_MapRGB(screen->format, 0x12, 0x12, 0x12));
+
+    render_screen_header(screen, "Settings", show_setting);
+
+    ListLayout layout = calc_list_layout(screen);
+
+    /* --- Selectable menu items --- */
+    char server_label[ND_MAX_STR + 12];
+    if (cfg->server_name[0])
+        snprintf(server_label, sizeof(server_label), "Server: %s", cfg->server_name);
+    else
+        snprintf(server_label, sizeof(server_label), "Server: (unknown)");
+
+    char library_label[ND_MAX_STR + 12];
+    if (cfg->library_name[0])
+        snprintf(library_label, sizeof(library_label), "Library: %s", cfg->library_name);
+    else
+        snprintf(library_label, sizeof(library_label), "Library: (not set)");
+
+    char timeout_label[64];
+    snprintf(timeout_label, sizeof(timeout_label), "Screen timeout: %s",
+             screen_timeout_label(cfg->screen_timeout));
+
+    char stream_bitrate_label[32];
+    snprintf(stream_bitrate_label, sizeof(stream_bitrate_label),
+             "Streaming Quality: %s", bitrate_label(cfg->stream_bitrate_kbps));
+
+    char download_bitrate_label[32];
+    snprintf(download_bitrate_label, sizeof(download_bitrate_label),
+             "Download Quality: %s", bitrate_label(cfg->download_bitrate_kbps));
+
+    char pocket_lock_label[48];
+    snprintf(pocket_lock_label, sizeof(pocket_lock_label),
+             "Pocket Button Lock: %s",
+             cfg->pocket_lock_enabled ? "MENU+SELECT" : "Off");
+
+    char preload_count_lbl[32];
+    snprintf(preload_count_lbl, sizeof(preload_count_lbl),
+             "Track Preload: %s", preload_count_label(cfg->preload_count));
+
+    const char *labels[SETTINGS_ITEM_COUNT] = {
+        server_label,
+        library_label,
+        timeout_label,
+        stream_bitrate_label,
+        download_bitrate_label,
+        pocket_lock_label,
+        preload_count_lbl,
+        "Sign Out",
+    };
+
+    for (int i = scroll; i < SETTINGS_ITEM_COUNT && i < scroll + menu_items_visible; i++) {
+        bool sel = (i == menu_selected);
+        char truncated[256];
+        MenuItemPos pos = render_menu_item_pill(screen, &layout,
+                                                labels[i], truncated,
+                                                i - scroll,   /* visual row index */
+                                                sel, 0);
+        render_list_item_text(screen, NULL, truncated, Fonts_getMedium(),
+                              pos.text_x, pos.text_y, layout.max_width, sel);
+    }
+
+    render_scroll_indicators(screen, scroll, menu_items_visible, SETTINGS_ITEM_COUNT);
+
+    GFX_blitButtonGroup((char*[]){"A", "SELECT", "B", "BACK", NULL}, 1, screen, 1);
+}
+
+/*
+ * Render the sign-out confirmation dialog overlay on top of the menu.
+ */
+static void render_signout_dialog(SDL_Surface *screen, int show_setting, int scroll,
+                                   int menu_items_visible)
+{
+    render_settings_menu(screen, show_setting, SETTINGS_ITEM_SIGN_OUT, scroll,
+                         menu_items_visible);
+
+    int box_w = SCALE1(280);
+    int box_h = SCALE1(80);
+
+    DialogBox dlg = render_dialog_box(screen, box_w, box_h);
+
+    SDL_Surface *msg = TTF_RenderUTF8_Blended(
+        Fonts_getMedium(), "Sign out of Navidrome?", COLOR_WHITE);
+    if (msg) {
+        int tx = dlg.box_x + (dlg.box_w - msg->w) / 2;
+        int ty = dlg.box_y + SCALE1(12);
+        SDL_BlitSurface(msg, NULL, screen, &(SDL_Rect){tx, ty});
+        SDL_FreeSurface(msg);
+    }
+
+    SDL_Surface *hint = TTF_RenderUTF8_Blended(
+        Fonts_getSmall(), "[A] Confirm  [B] Cancel", COLOR_LIGHT_TEXT);
+    if (hint) {
+        int tx = dlg.box_x + (dlg.box_w - hint->w) / 2;
+        int ty = dlg.box_y + box_h - SCALE1(28);
+        SDL_BlitSurface(hint, NULL, screen, &(SDL_Rect){tx, ty});
+        SDL_FreeSurface(hint);
+    }
+}
+
+/* =========================================================================
+ * Public entry point
+ * ========================================================================= */
+
+AppModule module_settings_run(SDL_Surface *screen)
+{
+    SettingsState state = SETTINGS_STATE_MENU;
+    int menu_selected = SETTINGS_ITEM_SWITCH_SERVER;
+    int menu_scroll = 0;
+    int menu_items_visible;
+    int dirty = 1;
+    int show_setting = 0;
+
+    /* Compute once — screen size is fixed for the session */
+    {
+        ListLayout il = calc_list_layout(screen);
+        int v = il.list_h / il.item_h;
+        menu_items_visible = (v < 1) ? 1 : v;
+    }
+
+    while (1) {
+        GFX_startFrame();
+        PAD_poll();
+        SDL_Delay(16);
+
+        /* Power management heartbeat — must run every frame before any early-return */
+        ModuleCommon_PWR_update(&dirty, &show_setting);
+
+        /* Global input (Start long-press → quit dialog, volume, etc.) */
+        GlobalInputResult global = ModuleCommon_handleGlobalInput(screen, &show_setting, 0);
+        if (global.should_quit) {
+            return MODULE_QUIT;
+        }
+        if (global.input_consumed) {
+            if (global.dirty) dirty = 1;
+            GFX_sync();
+            continue;
+        }
+
+        /* ------------------------------------------------------------------
+         * SETTINGS_STATE_MENU
+         * ------------------------------------------------------------------ */
+        if (state == SETTINGS_STATE_MENU) {
+            if (PAD_justRepeated(BTN_UP)) {
+                if (menu_selected > 0) {
+                    menu_selected--;
+                    adjust_list_scroll(menu_selected, &menu_scroll, menu_items_visible);
+                    dirty = 1;
+                }
+            } else if (PAD_justRepeated(BTN_DOWN)) {
+                if (menu_selected < SETTINGS_ITEM_COUNT - 1) {
+                    menu_selected++;
+                    adjust_list_scroll(menu_selected, &menu_scroll, menu_items_visible);
+                    dirty = 1;
+                }
+            } else if (PAD_justPressed(BTN_A) || PAD_justPressed(BTN_RIGHT)) {
+                if (menu_selected == SETTINGS_ITEM_SWITCH_SERVER) {
+                    /* Edit server / credentials on the sign-in screen */
+                    nd_art_clear();
+                    module_browse_reset();
+                    return MODULE_AUTH;
+                } else if (menu_selected == SETTINGS_ITEM_SIGN_OUT) {
+                    state = SETTINGS_STATE_SIGNOUT_CONFIRM;
+                    dirty = 1;
+                    GFX_sync();
+                    continue;
+                } else if (menu_selected == SETTINGS_ITEM_SCREEN_TIMEOUT) {
+                    NdConfig *cfg = nd_config_get_mutable();
+                    int idx = screen_timeout_index(cfg->screen_timeout);
+                    idx = (idx + 1) % SCREEN_TIMEOUT_COUNT;
+                    cfg->screen_timeout = SCREEN_TIMEOUT_VALUES[idx];
+                    nd_config_save(cfg);
+                    dirty = 1;
+                } else if (menu_selected == SETTINGS_ITEM_LIBRARY) {
+                    module_browse_request_library_pick();
+                    return MODULE_BROWSE;
+                } else if (menu_selected == SETTINGS_ITEM_STREAM_BITRATE) {
+                    NdConfig *cfg = nd_config_get_mutable();
+                    int idx = bitrate_index(cfg->stream_bitrate_kbps);
+                    idx = (idx + 1) % BITRATE_COUNT;
+                    cfg->stream_bitrate_kbps = BITRATE_VALUES[idx];
+                    nd_config_save(cfg);
+                    dirty = 1;
+                } else if (menu_selected == SETTINGS_ITEM_DOWNLOAD_BITRATE) {
+                    NdConfig *cfg = nd_config_get_mutable();
+                    int idx = bitrate_index(cfg->download_bitrate_kbps);
+                    idx = (idx + 1) % BITRATE_COUNT;
+                    cfg->download_bitrate_kbps = BITRATE_VALUES[idx];
+                    nd_config_save(cfg);
+                    dirty = 1;
+                } else if (menu_selected == SETTINGS_ITEM_POCKET_LOCK) {
+                    NdConfig *cfg = nd_config_get_mutable();
+                    cfg->pocket_lock_enabled = !cfg->pocket_lock_enabled;
+                    nd_config_save(cfg);
+                    dirty = 1;
+                } else if (menu_selected == SETTINGS_ITEM_PRELOAD_COUNT) {
+                    NdConfig *cfg = nd_config_get_mutable();
+                    cfg->preload_count = (cfg->preload_count + 1) % 11;
+                    nd_config_save(cfg);
+                    dirty = 1;
+                }
+            } else if (PAD_justPressed(BTN_LEFT)) {
+                if (menu_selected == SETTINGS_ITEM_SCREEN_TIMEOUT) {
+                    NdConfig *cfg = nd_config_get_mutable();
+                    int idx = screen_timeout_index(cfg->screen_timeout);
+                    idx = (idx - 1 + SCREEN_TIMEOUT_COUNT) % SCREEN_TIMEOUT_COUNT;
+                    cfg->screen_timeout = SCREEN_TIMEOUT_VALUES[idx];
+                    nd_config_save(cfg);
+                    dirty = 1;
+                } else if (menu_selected == SETTINGS_ITEM_STREAM_BITRATE) {
+                    NdConfig *cfg = nd_config_get_mutable();
+                    int idx = bitrate_index(cfg->stream_bitrate_kbps);
+                    idx = (idx - 1 + BITRATE_COUNT) % BITRATE_COUNT;
+                    cfg->stream_bitrate_kbps = BITRATE_VALUES[idx];
+                    nd_config_save(cfg);
+                    dirty = 1;
+                } else if (menu_selected == SETTINGS_ITEM_DOWNLOAD_BITRATE) {
+                    NdConfig *cfg = nd_config_get_mutable();
+                    int idx = bitrate_index(cfg->download_bitrate_kbps);
+                    idx = (idx - 1 + BITRATE_COUNT) % BITRATE_COUNT;
+                    cfg->download_bitrate_kbps = BITRATE_VALUES[idx];
+                    nd_config_save(cfg);
+                    dirty = 1;
+                } else if (menu_selected == SETTINGS_ITEM_POCKET_LOCK) {
+                    NdConfig *cfg = nd_config_get_mutable();
+                    cfg->pocket_lock_enabled = !cfg->pocket_lock_enabled;
+                    nd_config_save(cfg);
+                    dirty = 1;
+                } else if (menu_selected == SETTINGS_ITEM_PRELOAD_COUNT) {
+                    NdConfig *cfg = nd_config_get_mutable();
+                    cfg->preload_count = (cfg->preload_count + 10) % 11;
+                    nd_config_save(cfg);
+                    dirty = 1;
+                }
+            } else if (PAD_justPressed(BTN_B)) {
+                return MODULE_BROWSE;
+            }
+
+            if (dirty) {
+                render_settings_menu(screen, show_setting, menu_selected, menu_scroll,
+                                     menu_items_visible);
+                GFX_flip(screen);
+                dirty = 0;
+            } else {
+                GFX_sync();
+            }
+
+        /* ------------------------------------------------------------------
+         * SETTINGS_STATE_SIGNOUT_CONFIRM
+         * ------------------------------------------------------------------ */
+        } else if (state == SETTINGS_STATE_SIGNOUT_CONFIRM) {
+
+            if (PAD_justPressed(BTN_A)) {
+                /* Confirmed — zero config, save, clear art, reset browse, go to auth */
+                NdConfig *cfg = nd_config_get_mutable();
+                /* Forget credentials and library; keep the server URL and
+                 * username so signing back in is quick. */
+                cfg->password[0]     = '\0';
+                cfg->library_id      = 0;
+                cfg->library_name[0] = '\0';
+                cfg->offline_mode    = false;
+                nd_config_save(cfg);
+                nd_art_clear();
+                module_browse_reset();
+                return MODULE_AUTH;
+            } else if (PAD_justPressed(BTN_B)) {
+                state = SETTINGS_STATE_MENU;
+                dirty = 1;
+                GFX_sync();
+                continue;
+            }
+
+            if (dirty) {
+                render_signout_dialog(screen, show_setting, menu_scroll, menu_items_visible);
+                GFX_flip(screen);
+                dirty = 0;
+            } else {
+                GFX_sync();
+            }
+        }
+    }
+
+    /* Unreachable */
+    return MODULE_BROWSE;
+}

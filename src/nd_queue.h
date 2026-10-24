@@ -1,0 +1,62 @@
+#ifndef ND_QUEUE_H
+#define ND_QUEUE_H
+
+#include <stdbool.h>
+#include "nd_models.h"
+
+/* Maximum tracks in a queue (one album at a time) */
+#define ND_QUEUE_MAX_TRACKS 200
+
+typedef enum {
+    REPEAT_OFF = 0,
+    REPEAT_ALL,
+    REPEAT_ONE
+} RepeatMode;
+
+typedef struct {
+    NdTrack tracks[ND_QUEUE_MAX_TRACKS];
+    int count;
+    int current_index;       /* 0-based index into tracks[] */
+    char stream_url[2048]; /* authenticated stream URL for current_index */
+    bool active;             /* true if queue has been populated */
+    bool       shuffle;
+    RepeatMode repeat_mode;
+    int        shuffle_order[ND_QUEUE_MAX_TRACKS];
+} NdQueue;
+
+/* Access the global queue */
+NdQueue *nd_queue_get(void);
+
+/* Populate from an album's track list. Builds stream_url for tracks[index]. */
+void nd_queue_set(const NdConfig *cfg,
+                    const NdTrack *tracks, int count, int start_index);
+
+/* Advance to next track. Returns false if already at last track. */
+bool nd_queue_next(const NdConfig *cfg);
+
+/* Move to previous track. Returns false if already at first track. */
+bool nd_queue_prev(const NdConfig *cfg);
+
+/* True if there is a next/prev track available */
+bool nd_queue_has_next(void);
+bool nd_queue_has_prev(void);
+
+void nd_queue_clear(void);
+
+/* Returns pointer to the currently active track (respects shuffle order) */
+const NdTrack *nd_queue_current_track(void);
+
+/* Returns pointer to the track at current_index + offset (1 = next track).
+ * Respects shuffle order. Returns NULL if out of range or offset <= 0.
+ * Does not modify queue state. */
+const NdTrack *nd_queue_peek(int offset);
+
+/* Toggle shuffle on/off. When enabling, Fisher-Yates shuffles shuffle_order[]
+ * while keeping current track at current_index. When disabling, restores
+ * identity order and updates current_index to point to the same track. */
+void nd_queue_toggle_shuffle(void);
+
+/* Cycle repeat mode: Off -> All -> One -> Off */
+void nd_queue_cycle_repeat(void);
+
+#endif /* ND_QUEUE_H */

@@ -1,0 +1,4 @@
+bin/
+build/
+src/opus_obj/
+*.o

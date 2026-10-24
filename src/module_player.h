@@ -1,0 +1,32 @@
+#ifndef MODULE_PLAYER_H
+#define MODULE_PLAYER_H
+
+#include <SDL2/SDL.h>
+#include "module_auth.h"  /* AppModule */
+
+/*
+ * Run the player module (now-playing screen).
+ *
+ * Prerequisites: nd_queue_get() must return an active queue with
+ * current_index and stream_url already set.
+ *
+ * Returns the next AppModule:
+ *   MODULE_BROWSE — user pressed B (back)
+ *   MODULE_QUIT   — user pressed Start+long or quit
+ */
+AppModule module_player_run(SDL_Surface *screen);
+
+/*
+ * Called once per frame from the browse module's main loop while BG_MUSIC
+ * is active.  Handles background download completion, scrobbling, and
+ * auto-advance to the next track.  Must not block.
+ */
+void PlayerModule_backgroundTick(void);
+
+/*
+ * Cancel all in-flight preload downloads and discard cached preload files.
+ * Call when the queue order changes (new album selected, etc.).
+ */
+void PlayerModule_cancelPreload(void);
+
+#endif /* MODULE_PLAYER_H */

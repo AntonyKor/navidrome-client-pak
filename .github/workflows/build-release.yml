@@ -1,0 +1,59 @@
+name: Build & Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. v0.2.0)'
+        required: true
+        type: string
+      prerelease:
+        description: 'Mark as pre-release'
+        required: false
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ github.event.inputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Host API tests
+        run: tests/run_tests.sh
+
+      - name: Clone NextUI
+        run: git clone --depth 1 https://github.com/LoveRetro/NextUI.git "$RUNNER_TEMP/NextUI"
+
+      - name: Build and package
+        run: NEXTUI_ROOT="$RUNNER_TEMP/NextUI" scripts/package.sh "${VERSION:-0.0.0-dev}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Navidrome.pak
+          path: build/Navidrome.pak.zip
+
+      - name: Create GitHub Release
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PRERELEASE_FLAG=""
+          [ "${{ github.event.inputs.prerelease }}" = "true" ] && PRERELEASE_FLAG="--prerelease"
+          PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -n "$PREV_TAG" ]; then
+            git log "${PREV_TAG}..HEAD" --pretty=format:"- %s" --no-merges > release_notes.txt
+          else
+            git log --pretty=format:"- %s" --no-merges > release_notes.txt
+          fi
+          gh release create "$VERSION" --title "Navidrome $VERSION" $PRERELEASE_FLAG \
+            --notes-file release_notes.txt build/Navidrome.pak.zip
